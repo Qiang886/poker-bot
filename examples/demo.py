@@ -14,6 +14,9 @@ from src.icm import calculate_icm, icm_pressure
 from src.weighted_range import build_range_combos
 from src.ranges import get_rfi_range
 from src.multiway import adjust_for_multiway
+from src.range_updater import RangeUpdater
+from src.outs_calculator import OutsCalculator, format_outs_summary
+from src.sizing_tell import SizingTellInterpreter
 
 
 def separator(title):
@@ -169,6 +172,158 @@ def demo_barrel_planning():
     print(f"  Give-up runouts:  {plan.give_up_runouts}")
 
 
+def demo_range_updater():
+    separator("9. Range Updater – narrowing villain range based on actions")
+    board = cards_from_str("AcKd7h")
+    tex = analyze_board(board)
+    dead = board
+    original = build_range_combos(get_rfi_range(Position.CO), dead)
+
+    updater = RangeUpdater()
+    print(f"Board: Ac Kd 7h  |  Starting villain range: {len(original)} combos")
+
+    # After villain checks
+    after_check = updater.update_range_after_action(
+        original, board, "check", 0.0, "flop", tex, is_ip=True
+    )
+    print(f"After villain CHECK:         {len(after_check)} combos (strong hands removed)")
+
+    # After small bet
+    after_small = updater.update_range_after_action(
+        original, board, "bet", 0.30, "flop", tex, is_ip=True
+    )
+    print(f"After villain BET 30%:       {len(after_small)} combos (merged range)")
+
+    # After large bet
+    after_large = updater.update_range_after_action(
+        original, board, "bet", 0.85, "flop", tex, is_ip=True
+    )
+    print(f"After villain BET 85%:       {len(after_large)} combos (polarized – strong+bluffs)")
+
+    # After raise
+    after_raise = updater.update_range_after_action(
+        original, board, "raise", 2.5, "flop", tex, is_ip=True
+    )
+    print(f"After villain RAISE 2.5x:    {len(after_raise)} combos (very strong / some bluffs)")
+
+    # After all-in
+    after_allin = updater.update_range_after_action(
+        original, board, "all_in", 0.0, "flop", tex, is_ip=True
+    )
+    print(f"After villain ALL-IN:        {len(after_allin)} combos (nuts + minimal bluffs)")
+
+    # Monotone board all-in
+    board_mono = cards_from_str("KsQsJs")
+    tex_mono = analyze_board(board_mono)
+    original_mono = build_range_combos(get_rfi_range(Position.CO), board_mono)
+    after_mono_allin = updater.update_range_after_action(
+        original_mono, board_mono, "all_in", 0.0, "flop", tex_mono, is_ip=False
+    )
+    print(f"\nMonotone board (KsQsJs) villain ALL-IN: {len(after_mono_allin)} combos")
+    print("  (flush-heavy range – bluffing monotone all-in is rare)")
+
+
+def demo_outs_calculator():
+    separator("10. Precise Outs Calculator")
+    calc = OutsCalculator()
+
+    # Scenario 1: Nut flush draw
+    hole1 = tuple(cards_from_str("As9s"))
+    board1 = cards_from_str("Ks7s2h")
+    dead1 = list(hole1) + board1
+    vrange1 = build_range_combos(get_rfi_range(Position.CO), dead1)
+    analysis1 = calc.calculate_outs(hole1, board1, vrange1, simulations_per_out=100)
+    print("Scenario A: Nut flush draw (As9s on Ks7s2h)")
+    print(f"  {format_outs_summary(analysis1)}")
+    if analysis1.best_out:
+        print(f"  Best out: {analysis1.best_out.card} → {analysis1.best_out.improves_to} "
+              f"(equity after: {analysis1.best_out.equity_after:.0%})")
+
+    # Scenario 2: OESD
+    hole2 = tuple(cards_from_str("JhTh"))
+    board2 = cards_from_str("9s8d2c")
+    dead2 = list(hole2) + board2
+    vrange2 = build_range_combos(get_rfi_range(Position.CO), dead2)
+    analysis2 = calc.calculate_outs(hole2, board2, vrange2, simulations_per_out=100)
+    print("\nScenario B: OESD (JhTh on 9s8d2c)")
+    print(f"  {format_outs_summary(analysis2)}")
+
+    # Scenario 3: Set vs flush board
+    hole3 = tuple(cards_from_str("KhKd"))
+    board3 = cards_from_str("Ks9s5s")
+    dead3 = list(hole3) + board3
+    vrange3 = build_range_combos(get_rfi_range(Position.CO), dead3)
+    analysis3 = calc.calculate_outs(hole3, board3, vrange3, simulations_per_out=100)
+    print("\nScenario C: Set of Kings vs monotone board (KhKd on Ks9s5s)")
+    print(f"  {format_outs_summary(analysis3)}")
+    print(f"  Note: full house outs may be dirty if flush is already out there")
+
+    # Scenario 4: Combo draw
+    hole4 = tuple(cards_from_str("JsTs"))
+    board4 = cards_from_str("9s8s2h")
+    dead4 = list(hole4) + board4
+    vrange4 = build_range_combos(get_rfi_range(Position.CO), dead4)
+    analysis4 = calc.calculate_outs(hole4, board4, vrange4, simulations_per_out=100)
+    print("\nScenario D: Combo draw (JsTs on 9s8s2h – flush + OESD)")
+    print(f"  {format_outs_summary(analysis4)}")
+    print(f"  True equity ≈ {analysis4.true_equity:.0%} → strong semi-bluff candidate")
+
+
+def demo_sizing_tell():
+    separator("11. Sizing Tell Interpreter – infer range from bet size")
+    interp = SizingTellInterpreter()
+
+    board_dry = cards_from_str("Ac7d2h")
+    tex_dry = analyze_board(board_dry)
+    board_mono = cards_from_str("KsQsJs")
+    tex_mono = analyze_board(board_mono)
+
+    scenarios = [
+        ("Dry board, 25% bet", "bet", 0.25, "flop", tex_dry),
+        ("Dry board, 50% bet", "bet", 0.50, "flop", tex_dry),
+        ("Dry board, 85% bet", "bet", 0.85, "flop", tex_dry),
+        ("Dry board, 130% overbet", "bet", 1.30, "flop", tex_dry),
+        ("Monotone board, all-in", "all_in", 0.0, "flop", tex_mono),
+        ("Dry board, river 120% overbet", "bet", 1.20, "river", tex_dry),
+    ]
+
+    for label, action, ratio, street, tex in scenarios:
+        result = interp.interpret(action, ratio, street, tex)
+        print(f"\n  {label}:")
+        print(f"    Polarization:  {result.polarization}")
+        print(f"    Value %:       {result.estimated_value_pct:.0%}")
+        print(f"    Bluff %:       {result.estimated_bluff_pct:.0%}")
+        print(f"    Description:   {result.description}")
+
+    # Scenario: bot facing monotone board all-in
+    separator("12. Bot decision: facing all-in on monotone board (KsQsJs)")
+    bot = PokerBot(Position.BTN)
+    hand = tuple(cards_from_str("AhAd"))  # pocket aces but no flush
+    board = cards_from_str("KsQsJs")
+    gs = GameState(
+        hero_hand=hand,
+        board=board,
+        pot=50.0,
+        to_call=100.0,       # villain all-in
+        hero_stack=100.0,
+        villain_stacks=[100.0],
+        hero_position=Position.BTN,
+        villain_positions=[Position.BB],
+        street="flop",
+        action_history=[{
+            "actor": 1, "action": "all_in", "amount": 100.0,
+            "pot": 50.0, "street": "flop", "is_ip": False,
+        }],
+    )
+    result = bot.decide(gs)
+    hand_str = classify_hand(hand, board)
+    print(f"\nHand: AhAd | Board: KsQsJs (monotone)")
+    print(f"Hand strength: {hand_str.made_hand.name}")
+    print(f"Villain all-in (100BB into 50BB pot)")
+    print(f"Bot action: {result['action']} {result['amount']:.1f}")
+    print(f"Reasoning: {result['reasoning']}")
+
+
 if __name__ == "__main__":
     demo_preflop_aa_utg()
     demo_preflop_btn_3bet()
@@ -178,4 +333,7 @@ if __name__ == "__main__":
     demo_icm_bubble()
     demo_opponent_profiling()
     demo_barrel_planning()
+    demo_range_updater()
+    demo_outs_calculator()
+    demo_sizing_tell()
     print("\n✅ Demo completed successfully.")

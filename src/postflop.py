@@ -12,6 +12,8 @@ from src.barrel_plan import BarrelPlan, create_barrel_plan, get_current_action
 from src.weighted_range import ComboWeight
 from src.opponent import VillainProfile
 from src.multiway import adjust_for_multiway
+from src.sizing_tell import SizingTellInterpreter
+from src.outs_calculator import OutsCalculator, format_outs_summary
 
 
 @dataclass
@@ -24,6 +26,10 @@ class PostflopDecision:
 
 class PostflopEngine:
     """Rule-based postflop decision engine."""
+
+    def __init__(self) -> None:
+        self._sizing_tell = SizingTellInterpreter()
+        self._outs_calc = OutsCalculator()
 
     def decide(
         self,
@@ -40,6 +46,7 @@ class PostflopEngine:
         villain_range: List[ComboWeight],
         barrel_plan: Optional[BarrelPlan],
         is_multiway: bool = False,
+        sizing_ratio: float = 0.0,
     ) -> PostflopDecision:
         """Top-level postflop decision entry-point."""
         hand_strength = classify_hand(hero_hand, board)
@@ -57,10 +64,12 @@ class PostflopEngine:
         multiway_adj = adjust_for_multiway(hand_strength, 2 if not is_multiway else 3, board_texture)
 
         if to_call > 0:
+            # Compute sizing ratio for facing-bet analysis
+            actual_ratio = sizing_ratio if sizing_ratio > 0 else (to_call / pot if pot > 0 else 0.5)
             return self._facing_bet_decision(
                 hero_hand, board, pot, to_call, hero_stack,
                 hand_strength, board_texture, range_adv, position, villain_profile,
-                is_multiway, multiway_adj,
+                is_multiway, multiway_adj, villain_range, street, actual_ratio,
             )
         return self._first_to_act_decision(
             hero_hand, board, pot, hero_stack,
@@ -86,6 +95,9 @@ class PostflopEngine:
         villain_profile: Optional[VillainProfile],
         is_multiway: bool,
         multiway_adj,
+        villain_range: List[ComboWeight],
+        street: str,
+        sizing_ratio: float,
     ) -> PostflopDecision:
         spr = hero_stack / pot if pot > 0 else 10.0
         pot_odds = to_call / (pot + to_call) if (pot + to_call) > 0 else 0.5
@@ -93,7 +105,31 @@ class PostflopEngine:
         made = hand_strength.made_hand
         draw = hand_strength.draw
 
-        # Boost equity estimate for draws
+        # --- Sizing tell: interpret villain's bet ---
+        sizing_interp = self._sizing_tell.interpret(
+            action="bet",
+            sizing_ratio=sizing_ratio,
+            street=street,
+            board_texture=board_texture,
+            villain_profile=villain_profile,
+        )
+        sizing_note = f"[sizing: {sizing_interp.polarization}] "
+
+        # --- Outs analysis for draw hands ---
+        outs_note = ""
+        outs_analysis = None
+        has_draw = draw != DrawType.NONE
+        if has_draw and len(board) >= 3:
+            outs_analysis = self._outs_calc.calculate_outs(
+                hero_hand, board, villain_range, simulations_per_out=150
+            )
+            if outs_analysis.total_clean > 0 or outs_analysis.total_dirty > 0:
+                outs_note = f" | outs: {format_outs_summary(outs_analysis)}"
+                # Override equity estimate with true equity from outs analysis
+                if outs_analysis.true_equity > equity:
+                    equity = outs_analysis.true_equity
+
+        # Boost equity estimate for draws (keep as safety floor)
         if draw == DrawType.FLUSH_DRAW_NUT:
             equity = max(equity, 0.38)
         elif draw in (DrawType.COMBO_DRAW_NUT, DrawType.COMBO_DRAW):
@@ -115,14 +151,14 @@ class PostflopEngine:
                 return PostflopDecision(
                     action="all-in",
                     amount=hero_stack,
-                    reasoning=f"{made.name}: low SPR, shove for value",
+                    reasoning=f"{sizing_note}{made.name}: low SPR, shove for value",
                     confidence=0.95,
                 )
             raise_size = min(hero_stack, pot * 0.75 + to_call * 2.5)
             return PostflopDecision(
                 action="raise",
                 amount=raise_size,
-                reasoning=f"{made.name}: raise for value",
+                reasoning=f"{sizing_note}{made.name}: raise for value",
                 confidence=0.90,
             )
 
@@ -132,14 +168,26 @@ class PostflopEngine:
                 return PostflopDecision(
                     action="all-in",
                     amount=hero_stack,
-                    reasoning=f"{made.name}: committing stack",
+                    reasoning=f"{sizing_note}{made.name}: committing stack",
                     confidence=0.85,
                 )
             if ev_call > 0:
+                # If villain is polarized (large/overbet), consider raise with top hands
+                if sizing_interp.polarization in ("polarized", "very_polarized") and spr > 3:
+                    raise_size = min(hero_stack, pot * 0.75 + to_call * 2.5)
+                    return PostflopDecision(
+                        action="raise",
+                        amount=raise_size,
+                        reasoning=(
+                            f"{sizing_note}{made.name}: raise vs polarized sizing "
+                            f"(value_pct={sizing_interp.estimated_value_pct:.0%})"
+                        ),
+                        confidence=0.78,
+                    )
                 return PostflopDecision(
                     action="call",
                     amount=to_call,
-                    reasoning=f"{made.name}: positive EV call (equity={equity:.0%}, pot_odds={pot_odds:.0%})",
+                    reasoning=f"{sizing_note}{made.name}: positive EV call (equity={equity:.0%}, pot_odds={pot_odds:.0%})",
                     confidence=0.80,
                 )
 
@@ -151,13 +199,13 @@ class PostflopEngine:
                     return PostflopDecision(
                         action="raise",
                         amount=raise_size,
-                        reasoning=f"Semi-bluff raise: {draw.name}",
+                        reasoning=f"{sizing_note}Semi-bluff raise: {draw.name}{outs_note}",
                         confidence=0.70,
                     )
                 return PostflopDecision(
                     action="call",
                     amount=to_call,
-                    reasoning=f"Semi-bluff call: {draw.name} has equity {equity:.0%}",
+                    reasoning=f"{sizing_note}Semi-bluff call: {draw.name} has equity {equity:.0%}{outs_note}",
                     confidence=0.65,
                 )
 
@@ -166,7 +214,7 @@ class PostflopEngine:
             return PostflopDecision(
                 action="call",
                 amount=to_call,
-                reasoning=f"Call: positive EV ({ev_call:.2f}), {made.name}",
+                reasoning=f"{sizing_note}Call: positive EV ({ev_call:.2f}), {made.name}",
                 confidence=0.60,
             )
 
@@ -175,15 +223,31 @@ class PostflopEngine:
             return PostflopDecision(
                 action="call",
                 amount=to_call,
-                reasoning=f"Drawing call: equity {equity:.0%} > pot odds {pot_odds:.0%}",
+                reasoning=f"{sizing_note}Drawing call: equity {equity:.0%} > pot odds {pot_odds:.0%}{outs_note}",
                 confidence=0.55,
             )
 
-        # Fold
+        # Fold — if villain is very polarized and we have showdown value, pot-odds bluff-catch
+        if (
+            sizing_interp.polarization in ("polarized", "very_polarized")
+            and hand_strength.has_showdown_value
+            and equity >= pot_odds * 0.90
+        ):
+            return PostflopDecision(
+                action="call",
+                amount=to_call,
+                reasoning=(
+                    f"{sizing_note}Bluff-catch: villain polarized "
+                    f"(bluff_pct≈{sizing_interp.estimated_bluff_pct:.0%}), "
+                    f"showdown value with {made.name}"
+                ),
+                confidence=0.52,
+            )
+
         return PostflopDecision(
             action="fold",
             amount=0.0,
-            reasoning=f"Fold: equity {equity:.0%} < pot odds {pot_odds:.0%}, {made.name}",
+            reasoning=f"{sizing_note}Fold: equity {equity:.0%} < pot odds {pot_odds:.0%}, {made.name}",
             confidence=0.70,
         )
 
