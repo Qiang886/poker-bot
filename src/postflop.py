@@ -48,6 +48,10 @@ _MIN_SPR_FOR_POLARIZED_RAISE = 3
 _STRONG_EQUITY_THRESHOLD = 0.60
 _WEAK_EQUITY_THRESHOLD = 0.35
 
+# Maximum villain_range size to run full per-combo analysis.
+# Larger ranges fall back to player-type heuristics for performance.
+_MAX_RANGE_SIZE_FOR_ANALYSIS = 500
+
 
 class PostflopEngine:
     """Rule-based postflop decision engine."""
@@ -508,7 +512,7 @@ class PostflopEngine:
 
         if can_bet:
             action, confidence = mixed_decision(
-                ev_bet=ev_bet if can_bet else None,
+                ev_bet=ev_bet,
                 ev_check=ev_check,
                 temperature=1.0,
             )
@@ -1004,7 +1008,7 @@ class PostflopEngine:
                 return True, 0.33  # fish will call with ace-high
             # Range-based thin value: count villain combos weaker than hero that
             # have showdown value (BOTTOM_PAIR+) — air hands would fold, not call
-            if villain_range and len(villain_range) < 500 and player_type in ("TAG", "LAG"):
+            if villain_range and len(villain_range) < _MAX_RANGE_SIZE_FOR_ANALYSIS and player_type in ("TAG", "LAG"):
                 total_weight = sum(cw.weight for cw in villain_range)
                 if total_weight > 0:
                     worse_calling_weight = 0.0
@@ -1245,7 +1249,7 @@ class PostflopEngine:
         # Range-based estimate: fraction of villain combos that are weak (likely bluffs)
         estimated_bluff_pct = type_based_bluff_pct
         range_note = ""
-        if villain_range and len(villain_range) < 500:
+        if villain_range and len(villain_range) < _MAX_RANGE_SIZE_FOR_ANALYSIS:
             total_weight = sum(cw.weight for cw in villain_range)
             if total_weight > 0:
                 weak_weight = 0.0

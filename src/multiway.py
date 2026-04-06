@@ -48,6 +48,8 @@ def adjust_for_multiway(
     if num_players == 3:
         # 3-way: tighten value range to TPTK+, reduce bluffs, increase sizing
         freq_mult = 0.60
+        # Threshold adjustment = difference between TPTK and MIDDLE_PAIR in the IntEnum.
+        # This relies on MadeHandType being a sequential IntEnum (MIDDLE_PAIR=4, TPTK=7).
         threshold_adj = int(MadeHandType.TOP_PAIR_TOP_KICKER) - int(MadeHandType.MIDDLE_PAIR)
         # Combo draws can still semi-bluff 3-way
         bluff_ok = draw in (DrawType.COMBO_DRAW_NUT, DrawType.COMBO_DRAW)

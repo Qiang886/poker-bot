@@ -33,7 +33,11 @@ def test_fish_high_vpip_only():
 
 
 def test_fish_calling_station():
-    """VPIP > 40% AND WTSD > 35% → calling station (fish)."""
+    """VPIP > 40% AND WTSD > 35% → calling station (fish).
+
+    Note: make_villain sets wtsd explicitly to 0.40 here to trigger the
+    calling-station condition (default wtsd is 0.28, which would not trigger).
+    """
     v = make_villain(vpip=0.45, pfr=0.18, wtsd=0.40)
     assert v.is_fish() is True
 

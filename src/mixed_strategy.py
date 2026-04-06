@@ -56,7 +56,7 @@ def mixed_decision(
 
     # Large gap or pure-strategy mode → deterministic choice
     if ev_gap >= 0.15 or temperature == 0:
-        best = max(actions, key=actions.get)  # type: ignore[arg-type]
+        best = max(actions, key=lambda a: actions[a])
         return best, 0.85
 
     # Small gap → softmax mixing
@@ -76,5 +76,5 @@ def mixed_decision(
             return action, prob
 
     # Fallback (floating-point edge case)
-    best_action = max(actions, key=actions.get)  # type: ignore[arg-type]
+    best_action = max(actions, key=lambda a: actions[a])
     return best_action, probs.get(best_action, 0.7)
