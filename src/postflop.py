@@ -1216,10 +1216,14 @@ class PostflopEngine:
         return None
 
     def _villain_checked_back_flop(self, action_history: List[Dict]) -> bool:
-        """Detect whether the villain checked back on the flop (no cbet)."""
+        """Detect whether the villain checked back on the flop (no cbet).
+
+        Returns True only when there is at least one flop action from the villain
+        and none of those actions were a bet or raise.
+        """
         flop_actions = [
             a for a in action_history
-            if a.get("street") == "flop" and a.get("actor", 0) != 0
+            if a.get("street") == "flop" and a.get("actor") not in (None, 0)
         ]
         if not flop_actions:
             return False

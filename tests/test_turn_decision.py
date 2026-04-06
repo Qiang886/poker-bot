@@ -111,8 +111,7 @@ def test_turn_flush_complete_stops_bluff():
 def test_turn_flush_complete_hero_has_flush_bets():
     """Flush completes on turn and hero has it → value bet."""
     # AhKh on 9h6s3cJh (turn Jh → hero has nut flush draw completed)
-    # AhKh + Jh,Kh on board means we have Ah + more hearts  
-    # Actually: board 9h 6s 3c Jh → hero has AhKh, 3 hearts (A,J,9 from hero+board)
+    # Board: 9h 6s 3c Jh → hero has AhKh, 3 hearts (Ah, Jh, 9h from hero+board)
     # AhKh: hero has Ah → nut flush (9h, Jh, Ah = 3 hearts of which hero has Ah)
     d = decide("AhKh", "9h6s3cJh", pot=10.0, stack=100.0, position=Position.BTN)
     assert d.action in ("bet", "raise", "all-in")

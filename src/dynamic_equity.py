@@ -30,7 +30,7 @@ def adjust_equity_bucket(
     made = hand_strength.made_hand
 
     # Draw hands: do not adjust (draw equity is governed by outs, not bucket)
-    if hand_strength.draw not in (DrawType.NONE,):
+    if hand_strength.draw != DrawType.NONE:
         if made < MadeHandType.BOTTOM_PAIR:
             return base
 
