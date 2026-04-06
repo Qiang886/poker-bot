@@ -9,6 +9,11 @@ from src.hand_analysis import HandStrength, MadeHandType, DrawType
 from src.board_analysis import BoardTexture, RangeAdvantage, NutAdvantage
 
 
+# Default outs assumptions when OutsAnalysis is not provided
+_DEFAULT_NUT_FLUSH_CLEAN_OUTS = 9   # typical flush draw clean outs
+_DEFAULT_OESD_CLEAN_OUTS = 8        # typical OESD clean outs
+
+
 class ValueLine(Enum):
     BET_BET_BET = "bet_bet_bet"
     BET_BET_CHECK = "bet_bet_check"
@@ -49,8 +54,10 @@ def create_barrel_plan(
     position: str,           # "ip" or "oop"
     spr: float,
     villain_profile=None,    # Optional[VillainProfile] – avoid circular import
+    outs_analysis=None,      # Optional[OutsAnalysis] from outs_calculator
 ) -> BarrelPlan:
     """Choose a multi-street plan based on hand strength, board, and position."""
+    from src.outs_calculator import OutsAnalysis  # local import to avoid circular
     made = hand_strength.made_hand
     draw = hand_strength.draw
     in_position = position.lower() == "ip"
@@ -147,8 +154,21 @@ def create_barrel_plan(
 
     # ------------------------------------------------------------------
     # Nut draws: semi-bluff aggressively
+    # Use outs_analysis if available to calibrate barrel count
     # ------------------------------------------------------------------
     if draw in (DrawType.FLUSH_DRAW_NUT, DrawType.COMBO_DRAW_NUT):
+        clean_outs = outs_analysis.total_clean if outs_analysis is not None else _DEFAULT_NUT_FLUSH_CLEAN_OUTS
+        if clean_outs >= 12:
+            # Combo draw (12+ clean outs) → full triple barrel potential
+            return BarrelPlan(
+                flop_action="bet",
+                turn_action="bet",
+                river_action="bluff",
+                value_line=None,
+                bluff_line=BluffLine.BLUFF_TRIPLE_BARREL,
+                continue_runouts=["flush_completes", "straight_completes"],
+                give_up_runouts=[],
+            )
         if in_position:
             return BarrelPlan(
                 flop_action="bet",
@@ -172,8 +192,32 @@ def create_barrel_plan(
 
     # ------------------------------------------------------------------
     # Combo draw (non-nut): semi-bluff but give up if missed
+    # Use outs_analysis if available
     # ------------------------------------------------------------------
     if draw in (DrawType.COMBO_DRAW, DrawType.OESD):
+        clean_outs = outs_analysis.total_clean if outs_analysis is not None else _DEFAULT_OESD_CLEAN_OUTS
+        if clean_outs >= 8:
+            # Strong draw: semi-bluff double barrel
+            return BarrelPlan(
+                flop_action="bet" if in_position else "check",
+                turn_action="bet",
+                river_action="check",
+                value_line=None,
+                bluff_line=BluffLine.BLUFF_DOUBLE_BARREL if in_position else BluffLine.BLUFF_ONE_AND_DONE,
+                continue_runouts=["straight_completes"],
+                give_up_runouts=["blank"],
+            )
+        if clean_outs <= 4 and (outs_analysis is None or outs_analysis.total_dirty >= clean_outs):
+            # Weak/dirty draw: check-fold
+            return BarrelPlan(
+                flop_action="check",
+                turn_action="check",
+                river_action="check",
+                value_line=None,
+                bluff_line=None,
+                continue_runouts=[],
+                give_up_runouts=["any"],
+            )
         return BarrelPlan(
             flop_action="bet" if in_position else "check",
             turn_action="bet",
