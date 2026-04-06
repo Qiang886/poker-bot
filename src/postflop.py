@@ -16,6 +16,7 @@ from src.sizing_tell import SizingTellInterpreter
 from src.outs_calculator import OutsCalculator, format_outs_summary
 from src.dynamic_equity import adjust_equity_bucket
 from src.equity import calculate_equity
+from src.mixed_strategy import mixed_decision
 
 
 @dataclass
@@ -46,6 +47,10 @@ _MIN_SPR_FOR_POLARIZED_RAISE = 3
 # Below WEAK: not enough equity for value; only bluff when holding a draw.
 _STRONG_EQUITY_THRESHOLD = 0.60
 _WEAK_EQUITY_THRESHOLD = 0.35
+
+# Maximum villain_range size to run full per-combo analysis.
+# Larger ranges fall back to player-type heuristics for performance.
+_MAX_RANGE_SIZE_FOR_ANALYSIS = 500
 
 
 class PostflopEngine:
@@ -269,6 +274,11 @@ class PostflopEngine:
 
         ev_call = self._calculate_call_ev(to_call, pot, equity)
 
+        # EV comparisons for call vs fold vs raise
+        fold_equity_est = self._get_fold_equity(villain_profile, street)
+        default_raise_size = min(hero_stack, pot * 0.75 + to_call * 2.5)
+        ev_raise = self._calculate_raise_ev(equity, pot, to_call, default_raise_size, fold_equity_est)
+
         # ------------------------------------------------------------------
         # Monster hands: raise or call depending on stack depth
         # ------------------------------------------------------------------
@@ -335,12 +345,22 @@ class PostflopEngine:
                     confidence=0.65,
                 )
 
-        # Positive EV call for medium strength hands
+        # EV-based call/fold decision for remaining hands
+        # Sanity check: monster hands should never fold even if EV says so
+        if made >= MadeHandType.TRIPS_SET and ev_call < 0:
+            # Override: never fold a monster
+            return PostflopDecision(
+                action="call",
+                amount=to_call,
+                reasoning=f"{sizing_note}{made.name}: monster override, call despite negative EV",
+                confidence=0.75,
+            )
+
         if ev_call > 0 and hand_strength.has_showdown_value:
             return PostflopDecision(
                 action="call",
                 amount=to_call,
-                reasoning=f"{sizing_note}Call: positive EV ({ev_call:.2f}), {made.name}",
+                reasoning=f"{sizing_note}EV call: EV({ev_call:.2f}) > 0, {made.name}",
                 confidence=0.60,
             )
 
@@ -373,7 +393,7 @@ class PostflopEngine:
         return PostflopDecision(
             action="fold",
             amount=0.0,
-            reasoning=f"{sizing_note}Fold: equity {equity:.0%} < pot odds {pot_odds:.0%}, {made.name}",
+            reasoning=f"{sizing_note}EV fold: EV(call)={ev_call:.2f} < 0, equity {equity:.0%} < pot odds {pot_odds:.0%}, {made.name}",
             confidence=0.70,
         )
 
@@ -464,60 +484,58 @@ class PostflopEngine:
                     confidence=0.65,
                 )
 
-        # No plan: decide from scratch
-        if self._should_value_bet(hand_strength, board_texture, range_adv, position, spr):
-            sizing = calculate_sizing(
-                hand_strength, board_texture, range_adv, street,
-                spr, pot, hero_stack, is_value=True, is_multiway=is_multiway,
+        # No plan: decide from scratch using EV comparison
+        equity = hand_strength.equity_bucket
+        made = hand_strength.made_hand
+        fold_equity = self._get_fold_equity(villain_profile, street)
+
+        sizing = calculate_sizing(
+            hand_strength, board_texture, range_adv, street,
+            spr, pot, hero_stack, is_value=True, is_multiway=is_multiway,
+        )
+        bet_fraction = sizing.fraction_of_pot * multiway_adj.bet_frequency_multiplier
+        bet_amount = min(hero_stack, pot * bet_fraction)
+
+        ev_bet = self._calculate_bet_ev(equity, pot, bet_amount, fold_equity)
+        ev_check = self._calculate_check_ev(equity, pot)
+
+        # Multiway guard: must pass hand-strength threshold before betting
+        multiway_threshold = MadeHandType.TOP_PAIR_TOP_KICKER if is_multiway else MadeHandType.MIDDLE_PAIR
+
+        # Sanity overrides
+        is_air = made < MadeHandType.BOTTOM_PAIR and hand_strength.draw == DrawType.NONE
+        can_bet = (
+            bet_amount >= pot * 0.20
+            and (not is_multiway or made >= multiway_threshold)
+            and not (is_air and ev_bet > ev_check)
+        )
+
+        if can_bet:
+            action, confidence = mixed_decision(
+                ev_bet=ev_bet,
+                ev_check=ev_check,
+                temperature=1.0,
             )
-            if is_multiway and not multiway_adj.bluff_allowed:
-                if hand_strength.made_hand < MadeHandType.TOP_PAIR_TOP_KICKER + multiway_adj.value_threshold_adjustment:
-                    return PostflopDecision(
-                        action="check",
-                        amount=0.0,
-                        reasoning="Multiway: tightening value range, checking instead",
-                        confidence=0.65,
-                    )
-            bet_amount = min(hero_stack, pot * sizing.fraction_of_pot * multiway_adj.bet_frequency_multiplier)
-            if bet_amount < pot * 0.20:
-                return PostflopDecision(
-                    action="check",
-                    amount=0.0,
-                    reasoning="Bet too small after multiway adjustment, check instead",
-                    confidence=0.60,
-                )
+        else:
+            action = "check"
+            confidence = 0.65
+
+        if action == "bet":
             return PostflopDecision(
                 action="bet" if bet_amount < hero_stack else "all-in",
                 amount=bet_amount,
-                reasoning=f"Value bet ({sizing.reasoning}): {hand_strength.made_hand.name}",
-                confidence=0.80,
-            )
-
-        if self._should_bluff(hand_strength, board_texture, range_adv, position, spr, pot):
-            if is_multiway and not multiway_adj.bluff_allowed:
-                return PostflopDecision(
-                    action="check",
-                    amount=0.0,
-                    reasoning="Multiway: bluffing not profitable, check",
-                    confidence=0.70,
-                )
-            sizing = calculate_sizing(
-                hand_strength, board_texture, range_adv, street,
-                spr, pot, hero_stack, is_value=False, is_multiway=is_multiway,
-            )
-            bet_amount = min(hero_stack, pot * sizing.fraction_of_pot)
-            return PostflopDecision(
-                action="bet",
-                amount=bet_amount,
-                reasoning=f"Bluff ({sizing.reasoning}): {hand_strength.draw.name}",
-                confidence=0.50,
+                reasoning=(
+                    f"EV bet ({sizing.reasoning}): {made.name} "
+                    f"[EV(bet)={ev_bet:.2f} vs EV(check)={ev_check:.2f}]"
+                ),
+                confidence=confidence,
             )
 
         return PostflopDecision(
             action="check",
             amount=0.0,
-            reasoning=f"Check: {hand_strength.made_hand.name} – no clear bet",
-            confidence=0.65,
+            reasoning=f"EV check: {made.name} [EV(check)={ev_check:.2f} >= EV(bet)={ev_bet:.2f}]",
+            confidence=confidence,
         )
 
     # ------------------------------------------------------------------
@@ -587,6 +605,50 @@ class PostflopEngine:
     def _calculate_call_ev(self, to_call: float, pot: float, equity: float) -> float:
         """Simple EV: equity * (pot + to_call) - to_call."""
         return equity * (pot + to_call) - to_call
+
+    def _calculate_bet_ev(
+        self,
+        equity: float,
+        pot: float,
+        bet_size: float,
+        fold_equity: float,
+    ) -> float:
+        """EV(bet) = fold_eq × pot + (1 - fold_eq) × (equity × (pot + 2×bet) - bet)."""
+        return fold_equity * pot + (1.0 - fold_equity) * (
+            equity * (pot + 2.0 * bet_size) - bet_size
+        )
+
+    def _calculate_check_ev(self, equity: float, pot: float) -> float:
+        """EV(check) = equity × pot (simplified: check → showdown)."""
+        return equity * pot
+
+    def _calculate_raise_ev(
+        self,
+        equity: float,
+        pot: float,
+        to_call: float,
+        raise_size: float,
+        fold_equity: float,
+    ) -> float:
+        """EV(raise) = fold_eq × pot + (1 - fold_eq) × (equity × (pot + to_call + 2×raise) - (to_call + raise))."""
+        return fold_equity * pot + (1.0 - fold_equity) * (
+            equity * (pot + to_call + 2.0 * raise_size) - (to_call + raise_size)
+        )
+
+    def _get_fold_equity(
+        self,
+        villain_profile: Optional[VillainProfile],
+        street: str,
+    ) -> float:
+        """Return estimated fold equity from villain profile or sensible default."""
+        if villain_profile is None:
+            return 0.45
+        s = villain_profile.stats
+        if street == "flop":
+            return getattr(s, "fold_to_flop_cbet", 0.45)
+        if street == "turn":
+            return getattr(s, "fold_to_turn_cbet", 0.45)
+        return getattr(s, "fold_to_river_cbet", 0.45)
 
     def _evaluate_check_raise(
         self,
@@ -770,6 +832,34 @@ class PostflopEngine:
                         confidence=0.70,
                     )
 
+        # ── vs MANIAC (ultra-aggressive: VPIP > 45%, PFR > 30%, AF > 3.5) ──
+        elif player_type == "maniac":
+            # Trap strong hands: let maniac bluff into us
+            if not is_facing_bet and made >= MadeHandType.TOP_PAIR_GOOD_KICKER:
+                return PostflopDecision(
+                    action="check",
+                    amount=0.0,
+                    reasoning=f"Exploit maniac: trap with {made.name}, let maniac bluff",
+                    confidence=0.75,
+                )
+            # Wide call-down: maniac bluffs at extreme frequency
+            if is_facing_bet and base_decision.action == "fold":
+                if hand_strength.has_showdown_value and made >= MadeHandType.BOTTOM_PAIR:
+                    return PostflopDecision(
+                        action="call",
+                        amount=to_call,
+                        reasoning=f"Exploit maniac: wide call-down with {made.name}",
+                        confidence=0.65,
+                    )
+            # Never bluff a maniac (they will re-bluff or call everything)
+            if base_decision.action == "bet" and "Bluff" in base_decision.reasoning:
+                return PostflopDecision(
+                    action="check",
+                    amount=0.0,
+                    reasoning=f"Exploit maniac: never bluff a maniac",
+                    confidence=0.75,
+                )
+
         # ── vs TAG (balanced) ──
         elif player_type == "TAG":
             # River bluff when TAG over-folds river (no blocker data available)
@@ -808,23 +898,33 @@ class PostflopEngine:
         """River first-to-act: thin value / bluff selection / give-up."""
         made = hand_strength.made_hand
         spr = hero_stack / pot if pot > 0 else 10.0
+        equity = hand_strength.equity_bucket
+        fold_equity = self._get_fold_equity(villain_profile, "river")
 
         player_type = "TAG"
         if villain_profile is not None and villain_profile.stats.hands_played >= 30:
             player_type = villain_profile.classify()
 
-        # ── Thin value bet decision ──
+        # ── Thin value bet decision (villain_range–informed) ──
         can_value, value_sizing = self._can_thin_value_bet(
             hand_strength, villain_profile, player_type, board, pot, hero_stack, spr,
+            villain_range=villain_range,
         )
         if can_value:
             bet_amount = min(hero_stack, pot * value_sizing)
-            return PostflopDecision(
-                action="bet" if bet_amount < hero_stack else "all-in",
-                amount=bet_amount,
-                reasoning=f"River value bet ({value_sizing:.0%} pot) vs {player_type}: {made.name}",
-                confidence=0.80,
-            )
+            ev_bet = self._calculate_bet_ev(equity, pot, bet_amount, fold_equity)
+            ev_check = self._calculate_check_ev(equity, pot)
+            action, confidence = mixed_decision(ev_bet=ev_bet, ev_check=ev_check, temperature=1.0)
+            if action == "bet":
+                return PostflopDecision(
+                    action="bet" if bet_amount < hero_stack else "all-in",
+                    amount=bet_amount,
+                    reasoning=(
+                        f"River value bet ({value_sizing:.0%} pot) vs {player_type}: {made.name} "
+                        f"[EV(bet)={ev_bet:.2f}]"
+                    ),
+                    confidence=confidence,
+                )
 
         # ── Bluff selection ──
         if not is_multiway:
@@ -834,12 +934,18 @@ class PostflopEngine:
             )
             if should_bluff:
                 bet_amount = min(hero_stack, pot * bluff_sizing)
-                return PostflopDecision(
-                    action="bet" if bet_amount < hero_stack else "all-in",
-                    amount=bet_amount,
-                    reasoning=f"River bluff ({bluff_sizing:.0%} pot) vs {player_type}: blocker advantage",
-                    confidence=0.55,
-                )
+                ev_bluff = self._calculate_bet_ev(equity, pot, bet_amount, fold_equity)
+                ev_check = self._calculate_check_ev(equity, pot)
+                if ev_bluff > ev_check:
+                    return PostflopDecision(
+                        action="bet" if bet_amount < hero_stack else "all-in",
+                        amount=bet_amount,
+                        reasoning=(
+                            f"River bluff ({bluff_sizing:.0%} pot) vs {player_type}: blocker advantage "
+                            f"[EV(bluff)={ev_bluff:.2f}]"
+                        ),
+                        confidence=0.55,
+                    )
 
         # ── Default: check / give up ──
         return PostflopDecision(
@@ -858,10 +964,15 @@ class PostflopEngine:
         pot: float,
         hero_stack: float,
         spr: float,
+        villain_range: Optional[List[ComboWeight]] = None,
     ) -> Tuple[bool, float]:
         """Return (can_value_bet, sizing_fraction).
 
         Determines if hero can extract value on the river and at what size.
+        When villain_range is available (and small enough to iterate), use
+        range-based analysis to determine the fraction of villain combos that
+        are weaker than hero and would call — overriding the player-type
+        heuristic for marginal hands.
         """
         made = hand_strength.made_hand
 
@@ -882,18 +993,35 @@ class PostflopEngine:
         if made >= MadeHandType.TOP_PAIR_TOP_KICKER:
             return True, 0.60
 
-        # TPGK: villain-dependent
+        # TPGK: villain-dependent (exploit knowledge takes precedence over range)
         if made >= MadeHandType.TOP_PAIR_GOOD_KICKER:
             if player_type == "nit":
                 return False, 0.0  # nit only calls with better
             if player_type == "fish":
                 return True, 0.50  # fish calls with weaker
-            return True, 0.33  # thin value vs TAG/LAG
+            return True, 0.33  # thin value vs TAG/LAG/maniac
 
-        # Middle pair: only vs fish
+        # Middle pair: only vs fish by default, but range-based check can upgrade
+        # for TAG/LAG players when villain has many weaker but call-worthy combos
         if made >= MadeHandType.MIDDLE_PAIR:
             if player_type == "fish":
                 return True, 0.33  # fish will call with ace-high
+            # Range-based thin value: count villain combos weaker than hero that
+            # have showdown value (BOTTOM_PAIR+) — air hands would fold, not call
+            if villain_range and len(villain_range) < _MAX_RANGE_SIZE_FOR_ANALYSIS and player_type in ("TAG", "LAG"):
+                total_weight = sum(cw.weight for cw in villain_range)
+                if total_weight > 0:
+                    worse_calling_weight = 0.0
+                    for cw in villain_range:
+                        v_strength = classify_hand(cw.combo, board)
+                        if (
+                            v_strength.made_hand < made
+                            and v_strength.made_hand >= MadeHandType.BOTTOM_PAIR
+                        ):
+                            worse_calling_weight += cw.weight
+                    value_target_pct = worse_calling_weight / total_weight
+                    if value_target_pct > 0.30:
+                        return True, 0.33
             return False, 0.0
 
         # Big overpair
@@ -1093,37 +1221,55 @@ class PostflopEngine:
     ) -> Tuple[bool, str]:
         """Return (should_call, reasoning) for river bluff-catch decision.
 
-        Estimates villain's bluff frequency based on action line patterns
-        and player type, then compares to pot odds.
+        When villain_range is available (and small enough to iterate), the
+        fraction of weak combos in the range is used to estimate bluff %.
+        Otherwise falls back to player-type heuristic.
         """
         pot_odds = to_call / (pot + to_call) if (pot + to_call) > 0 else 0.5
 
-        # Base bluff estimate: assume moderate triple-barrel range
-        # (No explicit action history here; use heuristic from sizing)
+        # Base bluff estimate from sizing
         if sizing_ratio > 1.0:
-            # Overbet: polarized – some bluffs exist
             base_bluff_pct = 0.35
         elif sizing_ratio > 0.6:
-            # Standard large bet
             base_bluff_pct = 0.30
         else:
-            # Small bet: usually thin value; fewer bluffs
             base_bluff_pct = 0.18
 
-        # Adjust by player type
+        # Player-type multipliers
         type_multipliers = {
-            "fish": 0.3,   # fish almost never bluff
-            "nit": 0.2,    # nit never bluffs
-            "LAG": 1.5,    # LAG bluffs a lot
-            "TAG": 1.0,    # standard
+            "fish": 0.3,
+            "nit": 0.2,
+            "maniac": 2.0,
+            "LAG": 1.5,
+            "TAG": 1.0,
         }
-        estimated_bluff_pct = base_bluff_pct * type_multipliers.get(player_type, 1.0)
-        estimated_bluff_pct = max(0.0, min(1.0, estimated_bluff_pct))
+        type_based_bluff_pct = base_bluff_pct * type_multipliers.get(player_type, 1.0)
+        type_based_bluff_pct = max(0.0, min(1.0, type_based_bluff_pct))
+
+        # Range-based estimate: fraction of villain combos that are weak (likely bluffs)
+        estimated_bluff_pct = type_based_bluff_pct
+        range_note = ""
+        if villain_range and len(villain_range) < _MAX_RANGE_SIZE_FOR_ANALYSIS:
+            total_weight = sum(cw.weight for cw in villain_range)
+            if total_weight > 0:
+                weak_weight = 0.0
+                for cw in villain_range:
+                    v_strength = classify_hand(cw.combo, board)
+                    if (
+                        v_strength.made_hand < MadeHandType.MIDDLE_PAIR
+                        and v_strength.draw == DrawType.NONE
+                    ):
+                        weak_weight += cw.weight
+                range_based_bluff_pct = weak_weight / total_weight
+                # Blend range estimate (60%) with player-type estimate (40%)
+                estimated_bluff_pct = 0.6 * range_based_bluff_pct + 0.4 * type_based_bluff_pct
+                estimated_bluff_pct = max(0.0, min(1.0, estimated_bluff_pct))
+                range_note = f" range_bluff={range_based_bluff_pct:.0%},"
 
         should_call = estimated_bluff_pct >= pot_odds
         reasoning = (
-            f"River bluff-catch: estimated_bluff={estimated_bluff_pct:.0%} "
-            f"vs pot_odds={pot_odds:.0%} ({player_type})"
+            f"River bluff-catch: estimated_bluff={estimated_bluff_pct:.0%}"
+            f"{range_note} vs pot_odds={pot_odds:.0%} ({player_type})"
         )
         return should_call, reasoning
 
@@ -1318,60 +1464,54 @@ class PostflopEngine:
                     confidence=0.65,
                 )
 
-        # No plan: decide from scratch
-        if self._should_value_bet(hand_strength, board_texture, range_adv, position, spr):
-            sizing = calculate_sizing(
-                hand_strength, board_texture, range_adv, "turn",
-                spr, pot, hero_stack, is_value=True, is_multiway=is_multiway,
+        # No plan: decide from scratch using EV comparison
+        equity = hand_strength.equity_bucket
+        fold_equity = self._get_fold_equity(villain_profile, "turn")
+
+        sizing = calculate_sizing(
+            hand_strength, board_texture, range_adv, "turn",
+            spr, pot, hero_stack, is_value=True, is_multiway=is_multiway,
+        )
+        bet_fraction = sizing.fraction_of_pot * multiway_adj.bet_frequency_multiplier
+        bet_amount = min(hero_stack, pot * bet_fraction)
+
+        ev_bet = self._calculate_bet_ev(equity, pot, bet_amount, fold_equity)
+        ev_check = self._calculate_check_ev(equity, pot)
+
+        multiway_threshold = MadeHandType.TOP_PAIR_TOP_KICKER if is_multiway else MadeHandType.MIDDLE_PAIR
+        is_air = made < MadeHandType.BOTTOM_PAIR and draw == DrawType.NONE
+        can_bet = (
+            bet_amount >= pot * 0.20
+            and (not is_multiway or made >= multiway_threshold)
+            and not (is_air and ev_bet > ev_check)
+        )
+
+        if can_bet:
+            action, confidence = mixed_decision(
+                ev_bet=ev_bet,
+                ev_check=ev_check,
+                temperature=1.0,
             )
-            if is_multiway and not multiway_adj.bluff_allowed:
-                if made < MadeHandType.TOP_PAIR_TOP_KICKER + multiway_adj.value_threshold_adjustment:
-                    return PostflopDecision(
-                        action="check",
-                        amount=0.0,
-                        reasoning="Turn multiway: tightening value range",
-                        confidence=0.65,
-                    )
-            bet_amount = min(hero_stack, pot * sizing.fraction_of_pot * multiway_adj.bet_frequency_multiplier)
-            if bet_amount < pot * 0.20:
-                return PostflopDecision(
-                    action="check",
-                    amount=0.0,
-                    reasoning="Turn bet too small after multiway adjustment, check",
-                    confidence=0.60,
-                )
+        else:
+            action = "check"
+            confidence = 0.65
+
+        if action == "bet":
             return PostflopDecision(
                 action="bet" if bet_amount < hero_stack else "all-in",
                 amount=bet_amount,
-                reasoning=f"Turn value bet ({sizing.reasoning}): {made.name}",
-                confidence=0.78,
-            )
-
-        if self._should_bluff(hand_strength, board_texture, range_adv, position, spr, pot):
-            if is_multiway and not multiway_adj.bluff_allowed:
-                return PostflopDecision(
-                    action="check",
-                    amount=0.0,
-                    reasoning="Turn multiway: no bluffing",
-                    confidence=0.70,
-                )
-            sizing = calculate_sizing(
-                hand_strength, board_texture, range_adv, "turn",
-                spr, pot, hero_stack, is_value=False, is_multiway=is_multiway,
-            )
-            bet_amount = min(hero_stack, pot * sizing.fraction_of_pot)
-            return PostflopDecision(
-                action="bet",
-                amount=bet_amount,
-                reasoning=f"Turn bluff ({sizing.reasoning}): {draw.name}",
-                confidence=0.50,
+                reasoning=(
+                    f"Turn EV bet ({sizing.reasoning}): {made.name} "
+                    f"[EV(bet)={ev_bet:.2f} vs EV(check)={ev_check:.2f}]"
+                ),
+                confidence=confidence,
             )
 
         return PostflopDecision(
             action="check",
             amount=0.0,
-            reasoning=f"Turn check: {made.name} – no clear action",
-            confidence=0.65,
+            reasoning=f"Turn EV check: {made.name} [EV(check)={ev_check:.2f} >= EV(bet)={ev_bet:.2f}]",
+            confidence=confidence,
         )
 
     def _turn_facing_bet(
