@@ -15,6 +15,7 @@ from src.multiway import adjust_for_multiway
 from src.sizing_tell import SizingTellInterpreter
 from src.outs_calculator import OutsCalculator, format_outs_summary
 from src.dynamic_equity import adjust_equity_bucket
+from src.equity import calculate_equity
 
 
 @dataclass
@@ -39,6 +40,12 @@ class TurnChange:
 
 # Minimum SPR to consider a raise vs polarized sizing (below this just call or shove)
 _MIN_SPR_FOR_POLARIZED_RAISE = 3
+
+# Equity thresholds used in bet/bluff decisions.
+# Above STRONG: enough equity to value-bet regardless of hand classification.
+# Below WEAK: not enough equity for value; only bluff when holding a draw.
+_STRONG_EQUITY_THRESHOLD = 0.60
+_WEAK_EQUITY_THRESHOLD = 0.35
 
 
 class PostflopEngine:
@@ -107,6 +114,22 @@ class PostflopEngine:
             is_vulnerable=hand_strength.is_vulnerable,
             has_showdown_value=hand_strength.has_showdown_value,
         )
+
+        # ------------------------------------------------------------------
+        # Real equity via Monte Carlo (replaces fixed equity_bucket)
+        # ------------------------------------------------------------------
+        if villain_range:
+            num_sims = 500 if street in ("flop", "turn") else 300
+            real_equity = calculate_equity(
+                hero_hand, villain_range, board, num_simulations=num_sims
+            )
+            hand_strength = HandStrength(
+                made_hand=hand_strength.made_hand,
+                draw=hand_strength.draw,
+                equity_bucket=real_equity,
+                is_vulnerable=hand_strength.is_vulnerable,
+                has_showdown_value=hand_strength.has_showdown_value,
+            )
 
         if to_call > 0:
             # Compute sizing ratio for facing-bet analysis
@@ -510,7 +533,15 @@ class PostflopEngine:
         spr: float,
     ) -> bool:
         made = hand_strength.made_hand
+        equity = hand_strength.equity_bucket
         in_pos = position in (Position.BTN, Position.CO)
+
+        # Real-equity-first: high equity → always value bet
+        if equity > _STRONG_EQUITY_THRESHOLD:
+            return True
+        # Real-equity-first: low equity → don't value bet
+        if equity < _WEAK_EQUITY_THRESHOLD:
+            return False
 
         if made >= MadeHandType.TOP_PAIR_TOP_KICKER:
             return True
@@ -532,8 +563,16 @@ class PostflopEngine:
         pot: float,
     ) -> bool:
         draw = hand_strength.draw
+        equity = hand_strength.equity_bucket
         in_pos = position in (Position.BTN, Position.CO)
         has_adv = range_adv.nut_advantage == NutAdvantage.HERO
+
+        # Real-equity-first: low equity with draw → semi-bluff is justified
+        if equity < _WEAK_EQUITY_THRESHOLD and draw != DrawType.NONE:
+            return True
+        # Real-equity-first: strong made hand → no bluff needed (value-bet instead)
+        if equity > _STRONG_EQUITY_THRESHOLD:
+            return False
 
         if draw in (DrawType.FLUSH_DRAW_NUT, DrawType.COMBO_DRAW_NUT, DrawType.COMBO_DRAW):
             return True
