@@ -75,11 +75,11 @@ def show_stats(hand_num: int, player_wins: int, bot_wins: int,
     print("╔═══════════════════════════════╗")
     print("║        对战统计               ║")
     print("╠═══════════════════════════════╣")
-    print(f"║  总手数: {hand_num:<21}║")
-    print(f"║  你赢: {player_wins} 手 | Bot 赢: {bot_wins} 手{' ' * max(0, 9 - len(str(player_wins)) - len(str(bot_wins)))}║")
-    print(f"║  你的筹码: {player_stack:.1f}BB{' ' * max(0, 17 - len(f'{player_stack:.1f}'))}║")
-    print(f"║  Bot 筹码: {bot_stack:.1f}BB{' ' * max(0, 17 - len(f'{bot_stack:.1f}'))}║")
-    print(f"║  你的 bb/100: {bb100:+d}{' ' * max(0, 14 - len(str(abs(bb100))))}║")
+    print(f"║  总手数: {hand_num:<22}║")
+    print(f"║  你赢: {player_wins:<5} 手 | Bot 赢: {bot_wins:<5} 手  ║")
+    print(f"║  你的筹码: {player_stack:<20.1f}║")
+    print(f"║  Bot 筹码: {bot_stack:<20.1f}║")
+    print(f"║  你的 bb/100: {bb100:+d}{' ' * max(0, 14 - len(f'{bb100:+d}'))}║")
     print("╚═══════════════════════════════╝")
     print()
 
@@ -89,13 +89,13 @@ def show_game_over(winner: str, hand_num: int) -> None:
         print("╔═══════════════════════════════╗")
         print("║     🏆 游戏结束!              ║")
         print("║     你赢了！Bot 筹码归零       ║")
-        print(f"║     总共打了 {hand_num} 手{' ' * max(0, 15 - len(str(hand_num)))}║")
+        print(f"║     总共打了 {hand_num:<18}║")
         print("╚═══════════════════════════════╝")
     else:
         print("╔═══════════════════════════════╗")
         print("║     💀 游戏结束!              ║")
         print("║     Bot 赢了... 你筹码归零     ║")
-        print(f"║     总共打了 {hand_num} 手{' ' * max(0, 15 - len(str(hand_num)))}║")
+        print(f"║     总共打了 {hand_num:<18}║")
         print("║     继续练习！                 ║")
         print("╚═══════════════════════════════╝")
 
@@ -530,7 +530,7 @@ class HandEngine:
                     })
                     return "raise"
 
-        return "check"  # 不可达，但让 linter 满意
+        raise AssertionError("_player_action: should never reach this point")  # pragma: no cover
 
     # ── Bot 行动 ──────────────────────────────────────────────────────────
 
@@ -827,13 +827,6 @@ class HandEngine:
                 reason="你弃牌",
             )
         else:
-            reasoning = ""
-            # 找最后一条 bot fold 记录的理由
-            for rec in reversed(self.action_history):
-                if rec.get("player") == "villain" and rec.get("action") == "fold":
-                    break
-            reasoning = ""
-            # 从 bot decision reasoning 中取（通过 action_history 无法直接获取，这里留空）
             return HandResult(
                 winner="你",
                 amount=self.pot,
