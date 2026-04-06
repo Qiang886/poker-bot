@@ -176,10 +176,8 @@ def parse_action(
         except ValueError:
             print(f"  ⚠ 无效金额: {tokens[1]}")
             return None, None
-        if amount >= player_stack + (0 if to_call == 0 else 0):
-            # 如果 raise to 超过了当前 stack，视为 all-in
-            if amount >= player_stack:
-                return "allin", player_stack
+        if amount >= player_stack:
+            return "allin", player_stack
         if amount < min_raise - 0.001:
             print(f"  ⚠ 最小加注金额为 {min_raise:.1f}BB")
             return None, None
@@ -466,12 +464,7 @@ class HandEngine6Max:
                 p.bet_street += additional
                 pot += additional
 
-                new_lri = max(p.bet_street - max(
-                    (op.bet_street for i, op in enumerate(self.players) if i != player_idx and not op.folded),
-                    default=0.0
-                ), last_raise_increment)
-                if p.bet_street > old_bet:
-                    new_lri = p.bet_street - old_bet
+                new_lri = p.bet_street - old_bet if p.bet_street > old_bet else last_raise_increment
 
                 if p.stack <= 0:
                     p.is_allin = True

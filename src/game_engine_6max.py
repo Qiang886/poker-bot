@@ -105,9 +105,6 @@ def calculate_side_pots(players: List[PlayerState6]) -> List[SidePot]:
     根据每个玩家的总投入计算 main pot 和 side pots。
     返回 SidePot 列表，每个包含 amount 和 eligible_players（索引）。
     """
-    invested = [(i, p.total_invested) for i, p in enumerate(players) if not p.folded or p.total_invested > 0]
-    invested.sort(key=lambda x: x[1])
-
     side_pots: List[SidePot] = []
     prev_level = 0.0
 
