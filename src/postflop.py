@@ -5,9 +5,9 @@ from typing import List, Optional, Tuple
 
 from src.card import Card
 from src.position import Position, is_in_position
-from src.hand_analysis import HandStrength, MadeHandType, DrawType, classify_hand
+from src.hand_analysis import HandStrength, MadeHandType, DrawType, classify_hand, calculate_blocker_value
 from src.board_analysis import analyze_board, analyze_range_advantage, RangeAdvantage, NutAdvantage
-from src.sizing import calculate_sizing, SizingProfile
+from src.sizing import calculate_sizing, calculate_river_sizing, SizingProfile
 from src.barrel_plan import BarrelPlan, ValueLine, create_barrel_plan, get_current_action
 from src.weighted_range import ComboWeight
 from src.opponent import VillainProfile
@@ -70,6 +70,15 @@ class PostflopEngine:
         if to_call > 0:
             # Compute sizing ratio for facing-bet analysis
             actual_ratio = sizing_ratio if sizing_ratio > 0 else (to_call / pot if pot > 0 else 0.5)
+
+            # River gets independent decision framework
+            if street == "river":
+                return self._river_facing_bet(
+                    hero_hand, board, pot, to_call, hero_stack,
+                    hand_strength, board_texture, range_adv, position,
+                    villain_profile, is_multiway, villain_range, actual_ratio,
+                )
+
             base_decision = self._facing_bet_decision(
                 hero_hand, board, pot, to_call, hero_stack,
                 hand_strength, board_texture, range_adv, position, villain_profile,
@@ -77,6 +86,14 @@ class PostflopEngine:
                 barrel_plan=barrel_plan,
             )
         else:
+            # River gets independent decision framework
+            if street == "river":
+                return self._river_first_to_act(
+                    hero_hand, board, pot, hero_stack,
+                    hand_strength, board_texture, range_adv, position,
+                    villain_profile, is_multiway, villain_range, villain_stack,
+                )
+
             base_decision = self._first_to_act_decision(
                 hero_hand, board, pot, hero_stack,
                 hand_strength, board_texture, range_adv, position, street,
@@ -657,3 +674,344 @@ class PostflopEngine:
                     )
 
         return base_decision
+
+    # ------------------------------------------------------------------
+    # River independent decision framework
+    # ------------------------------------------------------------------
+
+    def _river_first_to_act(
+        self,
+        hero_hand: Tuple[Card, Card],
+        board: List[Card],
+        pot: float,
+        hero_stack: float,
+        hand_strength: HandStrength,
+        board_texture,
+        range_adv: RangeAdvantage,
+        position: Position,
+        villain_profile: Optional[VillainProfile],
+        is_multiway: bool,
+        villain_range: List[ComboWeight],
+        villain_stack: float,
+    ) -> PostflopDecision:
+        """River first-to-act: thin value / bluff selection / give-up."""
+        made = hand_strength.made_hand
+        spr = hero_stack / pot if pot > 0 else 10.0
+
+        player_type = "TAG"
+        if villain_profile is not None and villain_profile.stats.hands_played >= 30:
+            player_type = villain_profile.classify()
+
+        # ── Thin value bet decision ──
+        can_value, value_sizing = self._can_thin_value_bet(
+            hand_strength, villain_profile, player_type, board, pot, hero_stack, spr,
+        )
+        if can_value:
+            bet_amount = min(hero_stack, pot * value_sizing)
+            return PostflopDecision(
+                action="bet" if bet_amount < hero_stack else "all-in",
+                amount=bet_amount,
+                reasoning=f"River value bet ({value_sizing:.0%} pot) vs {player_type}: {made.name}",
+                confidence=0.80,
+            )
+
+        # ── Bluff selection ──
+        if not is_multiway:
+            should_bluff, bluff_sizing = self._should_river_bluff(
+                hero_hand, hand_strength, villain_profile, player_type, villain_range,
+                board, pot, hero_stack,
+            )
+            if should_bluff:
+                bet_amount = min(hero_stack, pot * bluff_sizing)
+                return PostflopDecision(
+                    action="bet" if bet_amount < hero_stack else "all-in",
+                    amount=bet_amount,
+                    reasoning=f"River bluff ({bluff_sizing:.0%} pot) vs {player_type}: blocker advantage",
+                    confidence=0.55,
+                )
+
+        # ── Default: check / give up ──
+        return PostflopDecision(
+            action="check",
+            amount=0.0,
+            reasoning=f"River check: {made.name} – no value bet or profitable bluff",
+            confidence=0.65,
+        )
+
+    def _can_thin_value_bet(
+        self,
+        hand_strength: HandStrength,
+        villain_profile: Optional[VillainProfile],
+        player_type: str,
+        board: List[Card],
+        pot: float,
+        hero_stack: float,
+        spr: float,
+    ) -> Tuple[bool, float]:
+        """Return (can_value_bet, sizing_fraction).
+
+        Determines if hero can extract value on the river and at what size.
+        """
+        made = hand_strength.made_hand
+
+        # All-in territory: very low SPR
+        if spr < 0.5:
+            if made >= MadeHandType.MIDDLE_PAIR:
+                return True, min(1.0, hero_stack / pot)
+
+        # Monster → always value bet big
+        if made >= MadeHandType.TRIPS_SET:
+            return True, 1.25 if spr > 2 else 0.75
+
+        # Strong value
+        if made >= MadeHandType.TOP_TWO_PAIR:
+            return True, 0.75
+
+        # TPTK
+        if made >= MadeHandType.TOP_PAIR_TOP_KICKER:
+            return True, 0.60
+
+        # TPGK: villain-dependent
+        if made >= MadeHandType.TOP_PAIR_GOOD_KICKER:
+            if player_type == "nit":
+                return False, 0.0  # nit only calls with better
+            if player_type == "fish":
+                return True, 0.50  # fish calls with weaker
+            return True, 0.33  # thin value vs TAG/LAG
+
+        # Middle pair: only vs fish
+        if made >= MadeHandType.MIDDLE_PAIR:
+            if player_type == "fish":
+                return True, 0.33  # fish will call with ace-high
+            return False, 0.0
+
+        # Big overpair
+        if made == MadeHandType.OVERPAIR_BIG:
+            return True, 0.55
+
+        # Small overpair: check if board has overcards
+        if made == MadeHandType.OVERPAIR_SMALL:
+            if board and hand_strength.is_vulnerable:
+                return False, 0.0  # board has overcard; check-call or check-fold
+            return True, 0.40
+
+        return False, 0.0
+
+    def _should_river_bluff(
+        self,
+        hero_hand: Tuple[Card, Card],
+        hand_strength: HandStrength,
+        villain_profile: Optional[VillainProfile],
+        player_type: str,
+        villain_range: List[ComboWeight],
+        board: List[Card],
+        pot: float,
+        hero_stack: float,
+    ) -> Tuple[bool, float]:
+        """Return (should_bluff, sizing_fraction).
+
+        River bluff based on math + blocker quality.
+        """
+        # Don't bluff with showdown value (check instead for pot control)
+        if hand_strength.has_showdown_value:
+            return False, 0.0
+
+        # Don't bluff fish – they don't fold
+        if player_type == "fish":
+            return False, 0.0
+
+        # Determine bluff sizing
+        if player_type == "nit":
+            bluff_sizing = 0.33  # small sizing enough vs nit
+        else:
+            bluff_sizing = 0.75  # standard river bluff
+
+        # Need fold percentage for the bluff to be profitable
+        need_fold_pct = bluff_sizing / (1.0 + bluff_sizing)  # e.g. 0.75/(1.75) = 0.43
+
+        # Estimate villain's actual fold frequency on river
+        base_fold = 0.50
+        if villain_profile is not None:
+            base_fold = getattr(villain_profile.stats, "fold_to_river_cbet", 0.45)
+
+        fold_adjust = {"fish": 0.6, "nit": 1.4, "LAG": 1.0, "TAG": 1.0}
+        estimated_fold = base_fold * fold_adjust.get(player_type, 1.0)
+        estimated_fold = max(0.0, min(1.0, estimated_fold))
+
+        # Calling station: skip bluff
+        if estimated_fold < 0.35:
+            return False, 0.0
+
+        # Calculate blocker score using hero's actual hole cards
+        # Weights: nut flush blocker > top pair/straight > sets
+        _NUT_FLUSH_WEIGHT = 1.5
+        _TOP_PAIR_WEIGHT = 1.0
+        _STRAIGHT_WEIGHT = 1.0
+        _SET_WEIGHT = 0.5
+        _BLOCKER_DIVISOR = 4.0
+        blocker_info = calculate_blocker_value(hero_hand, board)
+        blocker_score = (
+            blocker_info.get("blocks_nut_flush", 0.0) * _NUT_FLUSH_WEIGHT
+            + blocker_info.get("blocks_top_pair", 0.0) * _TOP_PAIR_WEIGHT
+            + blocker_info.get("blocks_straights", 0.0) * _STRAIGHT_WEIGHT
+            + blocker_info.get("blocks_sets", 0.0) * _SET_WEIGHT
+        ) / _BLOCKER_DIVISOR
+
+        if estimated_fold > need_fold_pct and blocker_score >= 0.2:
+            return True, bluff_sizing
+
+        # SPR < 1: all-in bluff instead of bet
+        spr = hero_stack / pot if pot > 0 else 10.0
+        if spr < 1 and estimated_fold > need_fold_pct:
+            return True, spr  # bet remaining stack
+
+        return False, 0.0
+
+    def _river_facing_bet(
+        self,
+        hero_hand: Tuple[Card, Card],
+        board: List[Card],
+        pot: float,
+        to_call: float,
+        hero_stack: float,
+        hand_strength: HandStrength,
+        board_texture,
+        range_adv: RangeAdvantage,
+        position: Position,
+        villain_profile: Optional[VillainProfile],
+        is_multiway: bool,
+        villain_range: List[ComboWeight],
+        sizing_ratio: float,
+    ) -> PostflopDecision:
+        """River facing a bet: bluff-catch or fold (or raise with nuts)."""
+        made = hand_strength.made_hand
+        pot_odds = to_call / (pot + to_call) if (pot + to_call) > 0 else 0.5
+        spr = hero_stack / pot if pot > 0 else 10.0
+
+        player_type = "TAG"
+        if villain_profile is not None and villain_profile.stats.hands_played >= 30:
+            player_type = villain_profile.classify()
+
+        # Raise with the nuts
+        if made >= MadeHandType.TRIPS_SET:
+            if spr < 3:
+                return PostflopDecision(
+                    action="all-in",
+                    amount=hero_stack,
+                    reasoning=f"River all-in: {made.name} (nut/near-nut hand)",
+                    confidence=0.95,
+                )
+            raise_size = min(hero_stack, pot * 0.85 + to_call * 2.5)
+            return PostflopDecision(
+                action="raise",
+                amount=raise_size,
+                reasoning=f"River raise for value: {made.name}",
+                confidence=0.90,
+            )
+
+        # No showdown value → fold (never bluff-catch with air)
+        if not hand_strength.has_showdown_value:
+            return PostflopDecision(
+                action="fold",
+                amount=0.0,
+                reasoning=f"River fold: {made.name} has no showdown value",
+                confidence=0.80,
+            )
+
+        # Villain-type shortcuts before bluff-catch math
+        if player_type == "fish":
+            # Fish bet = real hand; fold marginals
+            if made < MadeHandType.TOP_PAIR_TOP_KICKER and sizing_ratio > 0.5:
+                return PostflopDecision(
+                    action="fold",
+                    amount=0.0,
+                    reasoning=f"River fold vs fish large bet: {made.name} (fish bet = value)",
+                    confidence=0.72,
+                )
+        elif player_type == "nit":
+            # Nit almost never bluffs; fold unless monster
+            if made < MadeHandType.TRIPS_SET:
+                return PostflopDecision(
+                    action="fold",
+                    amount=0.0,
+                    reasoning=f"River fold vs nit bet: {made.name} (nit rarely bluffs)",
+                    confidence=0.78,
+                )
+
+        # Bluff-catch math
+        should_call, reasoning = self._river_bluff_catch(
+            hand_strength, villain_profile, player_type, villain_range,
+            board, pot, to_call, sizing_ratio,
+        )
+        if should_call:
+            return PostflopDecision(
+                action="call",
+                amount=to_call,
+                reasoning=reasoning,
+                confidence=0.60,
+            )
+
+        # Default fold
+        if hand_strength.has_showdown_value and made >= MadeHandType.TOP_PAIR_GOOD_KICKER:
+            # Marginal call if pot odds are close
+            if pot_odds < 0.35:
+                return PostflopDecision(
+                    action="call",
+                    amount=to_call,
+                    reasoning=f"River marginal call: {made.name}, pot odds {pot_odds:.0%}",
+                    confidence=0.52,
+                )
+
+        return PostflopDecision(
+            action="fold",
+            amount=0.0,
+            reasoning=f"River fold: {made.name}, bluff-catch not profitable (pot_odds={pot_odds:.0%})",
+            confidence=0.65,
+        )
+
+    def _river_bluff_catch(
+        self,
+        hand_strength: HandStrength,
+        villain_profile: Optional[VillainProfile],
+        player_type: str,
+        villain_range: List[ComboWeight],
+        board: List[Card],
+        pot: float,
+        to_call: float,
+        sizing_ratio: float,
+    ) -> Tuple[bool, str]:
+        """Return (should_call, reasoning) for river bluff-catch decision.
+
+        Estimates villain's bluff frequency based on action line patterns
+        and player type, then compares to pot odds.
+        """
+        pot_odds = to_call / (pot + to_call) if (pot + to_call) > 0 else 0.5
+
+        # Base bluff estimate: assume moderate triple-barrel range
+        # (No explicit action history here; use heuristic from sizing)
+        if sizing_ratio > 1.0:
+            # Overbet: polarized – some bluffs exist
+            base_bluff_pct = 0.35
+        elif sizing_ratio > 0.6:
+            # Standard large bet
+            base_bluff_pct = 0.30
+        else:
+            # Small bet: usually thin value; fewer bluffs
+            base_bluff_pct = 0.18
+
+        # Adjust by player type
+        type_multipliers = {
+            "fish": 0.3,   # fish almost never bluff
+            "nit": 0.2,    # nit never bluffs
+            "LAG": 1.5,    # LAG bluffs a lot
+            "TAG": 1.0,    # standard
+        }
+        estimated_bluff_pct = base_bluff_pct * type_multipliers.get(player_type, 1.0)
+        estimated_bluff_pct = max(0.0, min(1.0, estimated_bluff_pct))
+
+        should_call = estimated_bluff_pct >= pot_odds
+        reasoning = (
+            f"River bluff-catch: estimated_bluff={estimated_bluff_pct:.0%} "
+            f"vs pot_odds={pot_odds:.0%} ({player_type})"
+        )
+        return should_call, reasoning
