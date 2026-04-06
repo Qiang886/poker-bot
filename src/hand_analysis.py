@@ -84,19 +84,23 @@ def _flush_draw_type(hero_hand: Tuple[Card, Card], board: List[Card]) -> DrawTyp
     return DrawType.NONE
 
 
+_ACE_HIGH = 14  # numeric value of Rank.ACE
+_ACE_LOW = 1    # low-ace alias used in A-2-3-4-5 straights
+
+
 def _straight_draw_type(hero_hand: Tuple[Card, Card], board: List[Card]) -> DrawType:
     """Detect OESD or gutshot straight draw."""
     all_ranks = sorted({int(c.rank) for c in (list(hero_hand) + list(board))})
-    # Also treat ace as 1
-    if 14 in all_ranks:
-        all_ranks_with_low_ace = sorted(set(all_ranks) | {1})
+    # Also treat ace as low (1) for wheel draws
+    if _ACE_HIGH in all_ranks:
+        all_ranks_with_low_ace = sorted(set(all_ranks) | {_ACE_LOW})
     else:
         all_ranks_with_low_ace = all_ranks
 
     hero_ranks = {int(c.rank) for c in hero_hand}
-    # Also add low ace
-    if 14 in hero_ranks:
-        hero_ranks = hero_ranks | {1}
+    # Also add low ace for wheel draws
+    if _ACE_HIGH in hero_ranks:
+        hero_ranks = hero_ranks | {_ACE_LOW}
 
     oesd = False
     gutshot = False

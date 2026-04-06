@@ -321,9 +321,6 @@ class PostflopEngine:
 
         if made >= MadeHandType.TOP_PAIR_TOP_KICKER:
             return True
-        if made >= MadeHandType.TOP_PAIR_GOOD_KICKER and not board_texture.wet_board_risky()\
-                if hasattr(board_texture, 'wet_board_risky') else True:
-            return True
         if made >= MadeHandType.TOP_PAIR_GOOD_KICKER:
             return True
         if made >= MadeHandType.OVERPAIR_SMALL and spr < 6:

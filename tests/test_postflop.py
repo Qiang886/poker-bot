@@ -53,4 +53,4 @@ def test_air_folds_to_bet():
 
 def test_check_with_weak_hand():
     d = decide("2h3d", "AsKhQc", to_call=0.0)
-    assert d.action in ("check", "fold", "bet")  # most likely check
+    assert d.action == "check"

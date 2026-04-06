@@ -161,10 +161,11 @@ def calculate_blocker_score(
         if cw.combo[0] in hero_cards or cw.combo[1] in hero_cards
     )
 
-    # Normalise: a perfect blocker would block ~half the range (average)
+    # Normalise: a perfect blocker would block ~half the range (average).
+    # Scale factor 4.0 converts the raw blocked fraction (typically 0–0.25) to 0–1.
+    _BLOCKER_SCALE_FACTOR = 4.0
     raw = blocked_weight / total_weight
-    # Scale to 0-1
-    return min(1.0, raw * 4.0)
+    return min(1.0, raw * _BLOCKER_SCALE_FACTOR)
 
 
 def count_combos(hands: Set[str]) -> int:

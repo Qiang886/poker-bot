@@ -232,6 +232,8 @@ def get_current_action(
             return "check"
         action = plan.river_action if plan.river_action else "check"
         if action == "bluff" and plan.bluff_line is None:
+            # river_action was set to "bluff" but no bluff_line was assigned;
+            # fall back to a passive check rather than attempting an unplanned bluff
             return "check"
         return action
     return "check"
