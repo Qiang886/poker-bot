@@ -198,6 +198,8 @@ class VillainProfile:
         # Player type summary
         if self.is_fish():
             suggestions.append("Fish detected: value-bet aggressively, minimise bluffs")
+        elif self.is_maniac():
+            suggestions.append("Maniac detected: trap strong hands, wide call-down, never bluff")
         elif self.is_nit():
             suggestions.append("Nit detected: respect raises, steal blinds frequently")
         elif self.is_lag():
@@ -236,19 +238,46 @@ class VillainProfile:
     # ------------------------------------------------------------------
 
     def is_fish(self) -> bool:
-        """VPIP > 40%, PFR < 15%."""
-        return self.stats.vpip > 0.40 and self.stats.pfr < 0.15
+        """Improved fish detection — any of the following qualifies:
+        1. VPIP > 40% AND PFR < 15% (passive fish, original condition)
+        2. VPIP > 50% (any extremely loose player)
+        3. VPIP > 40% AND WTSD > 35% (calling station)
+        4. VPIP > 35% AND PFR < 10% (wider passive fish)
+        """
+        s = self.stats
+        if s.vpip > 0.40 and s.pfr < 0.15:
+            return True
+        if s.vpip > 0.50:
+            return True
+        if s.vpip > 0.40 and s.wtsd > 0.35:
+            return True
+        if s.vpip > 0.35 and s.pfr < 0.10:
+            return True
+        return False
+
+    def is_maniac(self) -> bool:
+        """VPIP > 45%, PFR > 30%, AF > 3.5 — ultra-aggressive, needs special strategy."""
+        s = self.stats
+        return s.vpip > 0.45 and s.pfr > 0.30 and s.aggression_factor > 3.5
 
     def is_nit(self) -> bool:
-        """VPIP < 15%."""
-        return self.stats.vpip < 0.15
+        """Improved nit detection:
+        1. VPIP < 16% (original, slightly relaxed)
+        2. VPIP < 20% AND PFR < 12% (occasional limper, never aggressive)
+        """
+        s = self.stats
+        if s.vpip < 0.16:
+            return True
+        if s.vpip < 0.20 and s.pfr < 0.12:
+            return True
+        return False
 
     def is_lag(self) -> bool:
-        """VPIP > 30%, PFR > 25%, AF > 3."""
+        """Improved LAG detection: VPIP > 28%, PFR > 22%, AF > 2.5."""
         return (
-            self.stats.vpip > 0.30
-            and self.stats.pfr > 0.25
-            and self.stats.aggression_factor > 3.0
+            self.stats.vpip > 0.28
+            and self.stats.pfr > 0.22
+            and self.stats.aggression_factor > 2.5
         )
 
     def is_tag(self) -> bool:
@@ -259,9 +288,16 @@ class VillainProfile:
         )
 
     def classify(self) -> str:
-        """Return a single player-type label: 'fish', 'nit', 'LAG', or 'TAG'."""
+        """Return player-type label.
+
+        Priority: fish → maniac → nit → LAG → TAG
+        Fish is checked first (most exploitable); maniac before nit so
+        a VPIP-50% aggressive player isn't mis-labelled as nit.
+        """
         if self.is_fish():
             return "fish"
+        if self.is_maniac():
+            return "maniac"
         if self.is_nit():
             return "nit"
         if self.is_lag():
