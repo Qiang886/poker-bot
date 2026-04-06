@@ -313,7 +313,7 @@ def analyze_runout(existing_board: List[Card], new_card: Card) -> List[str]:
             return 0
         best = cur = 1
         for i in range(1, len(vals)):
-            if vals[i] == vals[i - 1] + 1:
+            if vals[i].value == vals[i - 1].value + 1:
                 cur += 1
                 best = max(best, cur)
             else:

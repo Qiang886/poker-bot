@@ -510,10 +510,8 @@ class PostflopEngine:
         if street == "flop" and draw in (DrawType.FLUSH_DRAW_NUT, DrawType.COMBO_DRAW_NUT):
             if spr > 3:
                 if villain_profile is not None:
-                    fold_to_cr = getattr(villain_profile.stats, "check_raise_flop", 0.5)
-                    # Re-use check_raise_flop as proxy for villain's fold-to-check-raise
-                    # Low value means villain doesn't check-raise often (passive), so
-                    # our check-raise is less likely to get re-raised; use fold_to_cbet instead.
+                    # Use fold_to_flop_cbet as a proxy for villain's likelihood
+                    # of folding to a check-raise semi-bluff.
                     fold_cbet = getattr(villain_profile.stats, "fold_to_flop_cbet", 0.5)
                     if fold_cbet > 0.35:
                         return PostflopDecision(
@@ -646,16 +644,15 @@ class PostflopEngine:
 
         # ── vs TAG (balanced) ──
         elif player_type == "TAG":
-            # River bluff with blockers when TAG over-folds river
+            # River bluff when TAG over-folds river (no blocker data available)
             if street == "river" and not is_facing_bet and base_decision.action == "check":
                 fold_to_river = getattr(s, "fold_to_river_cbet", 0.45)
-                blocker_score = getattr(hand_strength, "blocker_score", 0.0)
-                if fold_to_river > 0.55 and blocker_score > 0.5:
+                if fold_to_river > 0.60:
                     bet_amount = min(pot * 0.75, hero_stack)
                     return PostflopDecision(
                         action="bet",
                         amount=bet_amount,
-                        reasoning=f"Exploit TAG: river bluff, fold_to_river={fold_to_river:.0%}, blockers",
+                        reasoning=f"Exploit TAG: river bluff, fold_to_river={fold_to_river:.0%}",
                         confidence=0.55,
                     )
 

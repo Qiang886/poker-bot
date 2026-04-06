@@ -57,7 +57,7 @@ def test_oop_set_dry_board_checks():
     """OOP set on dry board should check (planning to check-raise)."""
     d = decide("7h7d", "7s2cKd", position=Position.BB)
     assert d.action == "check"
-    assert "check-raise" in d.reasoning.lower() or "check" in d.action
+    assert "check-raise" in d.reasoning.lower()
 
 
 def test_oop_nut_flush_draw_check_raise():
