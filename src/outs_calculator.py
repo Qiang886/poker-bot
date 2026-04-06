@@ -147,7 +147,9 @@ class OutsCalculator:
             new_eval = evaluate_7(list(hole) + board_with_out)
             new_rank = new_eval[0]
 
-            # Only count as an out if hand CATEGORY improves (not just kicker)
+            # Only count as an out if the HAND CATEGORY improves (not just kicker).
+            # HandRank is an IntEnum where higher values = better hands
+            # (HIGH_CARD=1 → STRAIGHT_FLUSH=9), so new_rank > current_rank = improvement.
             if new_rank <= current_rank:
                 continue
 

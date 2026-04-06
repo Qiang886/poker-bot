@@ -36,7 +36,7 @@ class TestFlushDrawOuts:
         assert analysis.total_clean >= 9
 
     def test_low_flush_draw_outs_may_be_dirty(self, calc):
-        # 9s2s on Ks Qs 7h – non-nut flush draw (someone may have As or Ks which they do)
+        # 9s2s on Ks7s2h – non-nut flush draw (someone may have Ks or higher spade)
         hole = tuple(cards_from_str("9s2s"))
         board = cards_from_str("Ks7s2h")
         vrange = _villain_range(board)

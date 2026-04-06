@@ -9,6 +9,11 @@ from src.hand_analysis import HandStrength, MadeHandType, DrawType
 from src.board_analysis import BoardTexture, RangeAdvantage, NutAdvantage
 
 
+# Default outs assumptions when OutsAnalysis is not provided
+_DEFAULT_NUT_FLUSH_CLEAN_OUTS = 9   # typical flush draw clean outs
+_DEFAULT_OESD_CLEAN_OUTS = 8        # typical OESD clean outs
+
+
 class ValueLine(Enum):
     BET_BET_BET = "bet_bet_bet"
     BET_BET_CHECK = "bet_bet_check"
@@ -152,7 +157,7 @@ def create_barrel_plan(
     # Use outs_analysis if available to calibrate barrel count
     # ------------------------------------------------------------------
     if draw in (DrawType.FLUSH_DRAW_NUT, DrawType.COMBO_DRAW_NUT):
-        clean_outs = outs_analysis.total_clean if outs_analysis is not None else 9
+        clean_outs = outs_analysis.total_clean if outs_analysis is not None else _DEFAULT_NUT_FLUSH_CLEAN_OUTS
         if clean_outs >= 12:
             # Combo draw (12+ clean outs) → full triple barrel potential
             return BarrelPlan(
@@ -190,7 +195,7 @@ def create_barrel_plan(
     # Use outs_analysis if available
     # ------------------------------------------------------------------
     if draw in (DrawType.COMBO_DRAW, DrawType.OESD):
-        clean_outs = outs_analysis.total_clean if outs_analysis is not None else 8
+        clean_outs = outs_analysis.total_clean if outs_analysis is not None else _DEFAULT_OESD_CLEAN_OUTS
         if clean_outs >= 8:
             # Strong draw: semi-bluff double barrel
             return BarrelPlan(

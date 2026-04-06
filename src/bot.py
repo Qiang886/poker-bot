@@ -163,22 +163,28 @@ class PokerBot:
         board_texture,
         villain_range: List[ComboWeight],
     ) -> List[ComboWeight]:
-        """Apply RangeUpdater for each villain action in action_history."""
+        """Apply RangeUpdater for each villain action in action_history.
+
+        Action events should be dicts with these keys:
+          - 'actor': int — 0 = hero (skip), 1+ = villain (update range)
+          - 'action': str — "bet", "raise", "call", "check", "all_in", "fold"
+          - 'amount': float — bet size
+          - 'pot': float — pot at time of action (optional, falls back to gs.pot)
+          - 'street': str — "flop", "turn", "river" (optional, falls back to gs.street)
+          - 'is_ip': bool — whether villain is in position (optional, default True)
+        """
         updated = list(villain_range)
         if not gs.action_history or not gs.board:
             return updated
 
-        # We consider villain (id=0) actions only; hero actions skip
         for event in gs.action_history:
             if not isinstance(event, dict):
                 continue
-            # Expect events with keys: 'actor' (0=hero, 1=villain), 'action', 'amount', 'street'
+
+            # Determine actor: 0 = hero (skip), anything else = villain
             actor = event.get("actor", event.get("villain_id"))
-            if actor is None or actor == 0:
-                # Treat actor==0 as hero; skip
-                # If no 'actor' key, try to infer from position
-                if "position" in event and event["position"] == gs.hero_position:
-                    continue
+            if actor == 0:
+                continue  # hero action – skip
 
             action = event.get("action", "")
             if not action:

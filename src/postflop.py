@@ -24,6 +24,10 @@ class PostflopDecision:
     confidence: float  # 0-1
 
 
+# Minimum SPR to consider a raise vs polarized sizing (below this just call or shove)
+_MIN_SPR_FOR_POLARIZED_RAISE = 3
+
+
 class PostflopEngine:
     """Rule-based postflop decision engine."""
 
@@ -173,7 +177,7 @@ class PostflopEngine:
                 )
             if ev_call > 0:
                 # If villain is polarized (large/overbet), consider raise with top hands
-                if sizing_interp.polarization in ("polarized", "very_polarized") and spr > 3:
+                if sizing_interp.polarization in ("polarized", "very_polarized") and spr > _MIN_SPR_FOR_POLARIZED_RAISE:
                     raise_size = min(hero_stack, pot * 0.75 + to_call * 2.5)
                     return PostflopDecision(
                         action="raise",
