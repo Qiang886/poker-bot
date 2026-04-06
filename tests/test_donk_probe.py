@@ -216,9 +216,9 @@ def test_no_probe_with_air_no_draw():
         "2c4d", "AsKhQd3c",
         action_history=villain_checked_flop,
     )
-    # Pure air: no pair, no draw → no probe
+    # Pure air: no pair, no draw → no probe; if it does bet, it should not be a Probe bet
     if d.action == "bet":
-        assert "Probe" not in d.reasoning or "Probe" in d.reasoning
+        assert "Probe" not in d.reasoning, f"Should not probe with pure air, got: {d.reasoning}"
 
 
 def test_no_probe_without_checkback():

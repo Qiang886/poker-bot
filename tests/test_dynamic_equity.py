@@ -159,7 +159,6 @@ def test_equity_never_below_0_01():
     """Adjusted equity should never go below 0.01."""
     # Very weak hand + nit + wet board
     hs = make_hand_strength(MadeHandType.NO_PAIR, 0.08, DrawType.NONE, False, False)
-    bt, _ = analyze_board(cards_from_str("Js9s8s")), None
     bt = analyze_board(cards_from_str("Js9s8s"))
     adjusted = adjust_equity_bucket(hs, bt, "nit", "river", river_is_blank=False)
     assert adjusted >= 0.01, f"Equity should never go below 0.01, got {adjusted}"

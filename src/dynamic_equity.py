@@ -18,6 +18,9 @@ def adjust_equity_bucket(
         hand_strength: Classified hand strength (from classify_hand).
         board_texture: Analyzed board texture (from analyze_board).
         villain_type: One of "fish", "nit", "LAG", "TAG", "unknown".
+            "fish" and "nit" have the largest adjustments.
+            "LAG" has a mild positive adjustment for made hands.
+            "TAG" and "unknown" result in no villain-type adjustment.
         street: Current street: "flop", "turn", or "river".
         turn_is_blank: True if the turn card was a blank (no dangerous tag).
         river_is_blank: True if the river card was a blank.
