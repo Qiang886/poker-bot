@@ -1,10 +1,11 @@
 """Multi-street barrel planning for post-flop play."""
 
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
-from src.card import Card
+from src.card import Card, Rank
 from src.hand_analysis import HandStrength, MadeHandType, DrawType
 from src.board_analysis import BoardTexture, RangeAdvantage, NutAdvantage
 
@@ -67,13 +68,13 @@ def create_barrel_plan(
     # Monster hands: always 3-barrel for value
     # ------------------------------------------------------------------
     if made >= MadeHandType.TRIPS_SET:
-        # Slow-play sets on dry boards OOP
+        # OOP set on dry board: check-raise trap to build pot
         if made == MadeHandType.TRIPS_SET and not board.flush_possible and not board.straight_possible and not in_position:
             return BarrelPlan(
                 flop_action="check",
                 turn_action="bet",
                 river_action="bet",
-                value_line=ValueLine.BET_CHECK_BET,
+                value_line=ValueLine.CHECK_RAISE,
                 continue_runouts=["any"],
                 give_up_runouts=[],
             )
@@ -256,28 +257,157 @@ def create_barrel_plan(
     )
 
 
+def analyze_runout(existing_board: List[Card], new_card: Card) -> List[str]:
+    """Analyze a new turn or river card and return descriptive tags.
+
+    Tags returned (may include multiple):
+    - "flush_completes": new card brings 3+ cards of the same suit for the first time
+    - "monotone_4": board now has 4+ cards of the same suit
+    - "straight_completes": new card creates 3+ consecutive rank values (new milestone)
+    - "overcard": new card ranks higher than every card on the existing board
+    - "paired_board": new card pairs the board for the first time
+    - "scary_card": new card is an Ace or King arriving on a medium/low board
+    - "low_card": new card is a 2-6
+    - "blank": no dangerous tags (safe runout)
+    """
+    tags: List[str] = []
+    full_board = existing_board + [new_card]
+
+    # Suit analysis
+    suits_full = Counter(c.suit for c in full_board)
+    suits_old = Counter(c.suit for c in existing_board)
+    max_suit_full = max(suits_full.values()) if suits_full else 0
+    max_suit_old = max(suits_old.values()) if suits_old else 0
+
+    if max_suit_full >= 3 and max_suit_old < 3:
+        tags.append("flush_completes")
+    if max_suit_full >= 4:
+        tags.append("monotone_4")
+
+    # Pairing detection
+    ranks_full = [c.rank for c in full_board]
+    ranks_old = [c.rank for c in existing_board]
+    rank_counts_full = Counter(ranks_full)
+    rank_counts_old = Counter(ranks_old)
+    old_max_count = max(rank_counts_old.values()) if rank_counts_old else 0
+    new_max_count = max(rank_counts_full.values()) if rank_counts_full else 0
+    if new_max_count >= 2 and old_max_count < 2:
+        tags.append("paired_board")
+
+    # Overcard detection
+    if existing_board:
+        board_max_rank = max(c.rank for c in existing_board)
+        if new_card.rank > board_max_rank:
+            tags.append("overcard")
+
+    # Scary card: Ace or King arriving on a medium/low board
+    if existing_board:
+        board_max_val = max(c.rank for c in existing_board)
+        if new_card.rank in (Rank.ACE, Rank.KING) and board_max_val <= Rank.QUEEN:
+            tags.append("scary_card")
+
+    # Straight connectivity: count max consecutive run of distinct rank values
+    def _max_consecutive(cards: List[Card]) -> int:
+        vals = sorted(set(c.rank for c in cards))
+        if not vals:
+            return 0
+        best = cur = 1
+        for i in range(1, len(vals)):
+            if vals[i].value == vals[i - 1].value + 1:
+                cur += 1
+                best = max(best, cur)
+            else:
+                cur = 1
+        return best
+
+    consec_old = _max_consecutive(existing_board)
+    consec_new = _max_consecutive(full_board)
+    if consec_new >= 3 and consec_new > consec_old:
+        tags.append("straight_completes")
+
+    # Low card (2-6)
+    if new_card.rank <= Rank.SIX:
+        tags.append("low_card")
+
+    # Blank: no dangerous tags
+    danger_tags = {
+        "flush_completes", "straight_completes", "overcard",
+        "paired_board", "scary_card", "monotone_4",
+    }
+    if not any(t in danger_tags for t in tags):
+        tags.append("blank")
+
+    return tags
+
+
 def get_current_action(
     plan: BarrelPlan,
     street: str,
     turn_card: Optional[Card] = None,
     river_card: Optional[Card] = None,
+    board: Optional[List[Card]] = None,
 ) -> str:
-    """Return the recommended action for the current street given the plan."""
+    """Return the recommended action for the current street given the plan.
+
+    When ``board`` and the street card (``turn_card`` / ``river_card``) are
+    provided, ``analyze_runout`` is called to decide whether to deviate from
+    the plan based on the texture of the new card.
+    """
     street = street.lower()
+
     if street == "flop":
         return plan.flop_action
+
     if street == "turn":
-        # Check if turn card hits a give-up runout
+        # Global give-up override
         if plan.give_up_runouts and "any" in plan.give_up_runouts:
             return "check"
+
+        if turn_card is not None and board is not None:
+            # board[:3] is the flop; turn_card is the new card
+            flop = board[:3]
+            runout_tags = analyze_runout(flop, turn_card)
+
+            # Dangerous runout: give up
+            for tag in runout_tags:
+                if tag in plan.give_up_runouts:
+                    return "check"
+
+            # Continue runouts: must match one (unless "any" or blank)
+            if plan.continue_runouts and "any" not in plan.continue_runouts:
+                has_continue = any(tag in plan.continue_runouts for tag in runout_tags)
+                if not has_continue and "blank" not in runout_tags:
+                    return "check"
+
         return plan.turn_action if plan.turn_action else "check"
+
     if street == "river":
+        # Global give-up override
         if plan.give_up_runouts and "any" in plan.give_up_runouts:
             return "check"
+
+        if river_card is not None and board is not None:
+            # board[:4] is flop+turn; river_card is the new card
+            turn_board = board[:4]
+            runout_tags = analyze_runout(turn_board, river_card)
+
+            # Dangerous runout: give up
+            for tag in runout_tags:
+                if tag in plan.give_up_runouts:
+                    return "check"
+
+            action = plan.river_action if plan.river_action else "check"
+            if action == "bluff":
+                # Only bluff on safe runouts; back off on scary/draw-completing cards
+                if "scary_card" in runout_tags or "flush_completes" in runout_tags:
+                    return "check"
+            return action
+
         action = plan.river_action if plan.river_action else "check"
         if action == "bluff" and plan.bluff_line is None:
             # river_action was set to "bluff" but no bluff_line was assigned;
             # fall back to a passive check rather than attempting an unplanned bluff
             return "check"
         return action
+
     return "check"

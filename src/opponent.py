@@ -257,3 +257,22 @@ class VillainProfile:
             0.20 <= self.stats.vpip <= 0.30
             and 0.15 <= self.stats.pfr <= 0.25
         )
+
+    def classify(self) -> str:
+        """Return a single player-type label: 'fish', 'nit', 'LAG', or 'TAG'."""
+        if self.is_fish():
+            return "fish"
+        if self.is_nit():
+            return "nit"
+        if self.is_lag():
+            return "LAG"
+        return "TAG"
+
+    def generate_exploit_notes(self) -> str:
+        """Alias for get_exploit_suggestion covering common postflop situations."""
+        parts = []
+        for situation in ("facing_cbet", "cbet_opportunity", "probe_opportunity"):
+            note = self.get_exploit_suggestion("postflop", situation)
+            if note and note != "No specific exploit identified":
+                parts.append(note)
+        return "; ".join(parts) if parts else "No specific exploit identified"
